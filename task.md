@@ -19,6 +19,15 @@
 - [x] Verify 5MB synthetic blob transfer with backpressure handling (322 frames, 0 loss)
 - [x] Shut down test server
 
-## Milestone 4: Documentation & Final Delivery
+## Milestone 4: Documentation & Initial Delivery
 - [x] Generate comprehensive `walkthrough.md` artifact
 - [x] Commit & update Git repository
+
+## Milestone 5: High-Craft Anti-AI-Slop Redesign
+- [x] Replace neon ambient blur blobs and generic gradients with obsidian design tokens (`#09090b` / `#121215`)
+- [x] Design camera viewfinder QR framing with optical corner brackets
+- [x] Add tactile segmented control, global window drag-and-drop overlay, and image thumbnail previews
+- [x] Implement synthesized Web Audio clicks and session transmission history feed
+- [x] Redesign mobile receiver cards with high-contrast actions and Web Share API integration
+- [x] Verify in browser with subagent visual captures
+- [x] Update walkthrough artifact and git commit
