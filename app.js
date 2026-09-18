@@ -1,12 +1,12 @@
 /**
  * AirQR — Main Application Controller
- * Orchestrates routing, DOM events, and modules.
+ * Orchestrates routing, DOM events, WebRTC lifecycle, and session interactions.
  * Path: app.js
  */
 
-import { PeerTransportManager } from './src/transport/peer_manager.js';
-import { BinaryChunkStreamer, BinaryChunkAssembler } from './src/streamer/chunker.js';
-import { renderMobilePayload, escapeHtml, formatBytes, triggerHaptic } from './src/renderers/payload_viewer.js';
+import { PeerTransportManager } from './src/transport/peer_manager.js?v=3';
+import { BinaryChunkStreamer, BinaryChunkAssembler } from './src/streamer/chunker.js?v=3';
+import { renderMobilePayload, escapeHtml, formatBytes, triggerHaptic } from './src/renderers/payload_viewer.js?v=3';
 
 class AirQRApp {
   constructor() {
@@ -18,9 +18,78 @@ class AirQRApp {
     this.stagedText = null;
     this.stagedFile = null;
     this.qrInstance = null;
+    this.soundEnabled = localStorage.getItem('airqr_sound') !== 'false';
+    this.sessionHistory = [];
+    this.audioCtx = null;
 
     this._bindTransportEvents();
     this._bindDomEvents();
+    this._initAudio();
+  }
+
+  /**
+   * Initializes lightweight Web Audio synth for crisp tactile feedback.
+   * @private
+   */
+  _initAudio() {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (AudioContext) {
+        this.audioCtx = new AudioContext();
+      }
+    } catch {
+      this.audioCtx = null;
+    }
+  }
+
+  /**
+   * Plays a subtle, tactile click/pop sound via synthesized sine wave.
+   * @param {'click' | 'success' | 'connect'} type 
+   * @private
+   */
+  _playSound(type = 'click') {
+    if (!this.soundEnabled || !this.audioCtx) return;
+
+    try {
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume();
+      }
+
+      const osc = this.audioCtx.createOscillator();
+      const gain = this.audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(this.audioCtx.destination);
+
+      const now = this.audioCtx.currentTime;
+
+      if (type === 'click') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(800, now);
+        osc.frequency.exponentialRampToValueAtTime(400, now + 0.03);
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
+        osc.start(now);
+        osc.stop(now + 0.035);
+      } else if (type === 'success') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(587.33, now); // D5
+        osc.frequency.setValueAtTime(880, now + 0.06); // A5
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+        osc.start(now);
+        osc.stop(now + 0.17);
+      } else if (type === 'connect') {
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(440, now);
+        osc.frequency.exponentialRampToValueAtTime(659.25, now + 0.08);
+        gain.gain.setValueAtTime(0.07, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+        osc.start(now);
+        osc.stop(now + 0.13);
+      }
+    } catch {
+      // Ignore audio synthesis errors
+    }
   }
 
   /**
@@ -29,6 +98,7 @@ class AirQRApp {
   boot() {
     window.addEventListener('hashchange', () => this._handleRouting());
     this._handleRouting();
+    this._updateSoundUi();
   }
 
   /**
@@ -102,7 +172,7 @@ class AirQRApp {
   }
 
   /**
-   * Generates a 512x512 high-resolution QR code for instant mobile camera detection.
+   * Generates a crisp high-resolution QR code.
    * @param {string} url 
    * @private
    */
@@ -116,7 +186,7 @@ class AirQRApp {
         text: url,
         width: 512,
         height: 512,
-        colorDark: '#020617',
+        colorDark: '#09090b',
         colorLight: '#ffffff',
         correctLevel: window.QRCode.CorrectLevel.H
       });
@@ -130,27 +200,30 @@ class AirQRApp {
    * @private
    */
   _bindTransportEvents() {
-    this.peerManager.addEventListener('peer_ready', (e) => {
-      this._updateStatus('Waiting for Scan', 'amber', 'Point phone camera at QR code');
+    this.peerManager.addEventListener('peer_ready', () => {
+      this._updateStatus('Ready for Scan', 'amber', 'Point phone camera at QR code');
     });
 
     this.peerManager.addEventListener('peer_connected', (e) => {
       triggerHaptic();
-      this._updateStatus('Connected', 'emerald', 'Encrypted WebRTC DataChannel established');
+      this._playSound('connect');
+      this._updateStatus('Connected', 'emerald', 'Encrypted WebRTC DataChannel active');
       
       const peerIdStat = document.getElementById('peer-id-stat');
       if (peerIdStat) {
-        peerIdStat.textContent = `Peer: ${e.detail.peerId.substring(0, 12)}...`;
+        peerIdStat.textContent = `Peer: ${e.detail.peerId.substring(0, 14)}...`;
       }
       const peerCard = document.getElementById('peer-details-card');
       if (peerCard) peerCard.classList.remove('hidden');
+
+      this._showToast('Mobile device linked via P2P', 'success');
 
       // Auto-State Sync: transmit staged payload immediately if uploaded before scan
       this._dispatchStagedPayload();
     });
 
     this.peerManager.addEventListener('peer_disconnected', (e) => {
-      this._updateStatus('Disconnected', 'amber', e.detail.message || 'Peer connection dropped');
+      this._updateStatus('Disconnected', 'amber', e.detail.message || 'Peer connection closed');
       const peerCard = document.getElementById('peer-details-card');
       if (peerCard) peerCard.classList.add('hidden');
     });
@@ -180,12 +253,21 @@ class AirQRApp {
       if (waitingBox) waitingBox.classList.add('hidden');
       if (container) container.classList.remove('hidden');
 
+      const textVal = data.payload || data.text;
       renderMobilePayload({
         type: 'text',
-        text: data.payload || data.text,
+        text: textVal,
         isUrl: data.isUrl,
         timestamp: data.timestamp || Date.now()
       }, container);
+
+      this._playSound('success');
+      this._addActivityLog({
+        type: 'text',
+        name: textVal.length > 30 ? textVal.substring(0, 30) + '...' : textVal,
+        detail: `${textVal.length} chars`,
+        timestamp: Date.now()
+      });
       return;
     }
 
@@ -215,7 +297,15 @@ class AirQRApp {
           if (progressBox) progressBox.classList.add('hidden');
           if (container) container.classList.remove('hidden');
           renderMobilePayload(filePayload, container);
+          this._playSound('success');
           this._showToast(`Received ${filePayload.name}`, 'success');
+
+          this._addActivityLog({
+            type: 'file',
+            name: filePayload.name,
+            detail: formatBytes(filePayload.size),
+            timestamp: Date.now()
+          });
         }
       );
     }
@@ -250,7 +340,15 @@ class AirQRApp {
         timestamp: Date.now()
       });
       triggerHaptic();
+      this._playSound('success');
       this._showToast('Text transmitted to mobile', 'success');
+
+      this._addActivityLog({
+        type: 'text',
+        name: trimmed.length > 30 ? trimmed.substring(0, 30) + '...' : trimmed,
+        detail: `${trimmed.length} chars`,
+        timestamp: Date.now()
+      });
     } catch (err) {
       this._showToast(`Transmission error: ${err.message}`, 'error');
     }
@@ -282,11 +380,19 @@ class AirQRApp {
         if (progressChunk) {
           const currentChunk = Math.ceil(sentBytes / (16 * 1024));
           const totalChunks = Math.ceil(totalBytes / (16 * 1024));
-          progressChunk.textContent = `Chunk ${currentChunk} / ${totalChunks}`;
+          progressChunk.textContent = `Chunk ${currentChunk} of ${totalChunks}`;
         }
       });
       triggerHaptic();
+      this._playSound('success');
       this._showToast(`Transfer complete: ${file.name}`, 'success');
+
+      this._addActivityLog({
+        type: 'file',
+        name: file.name,
+        detail: formatBytes(file.size),
+        timestamp: Date.now()
+      });
     } catch (err) {
       this._showToast(`Transfer failed: ${err.message}`, 'error');
     }
@@ -300,19 +406,19 @@ class AirQRApp {
     const colorClasses = {
       emerald: {
         dot: 'w-2 h-2 rounded-full bg-emerald-400',
-        pill: 'border-emerald-500/40 text-emerald-300'
+        pill: 'border-emerald-500/30 text-emerald-300'
       },
       amber: {
-        dot: 'w-2 h-2 rounded-full bg-amber-400 animate-pulse',
-        pill: 'border-amber-500/40 text-amber-300'
+        dot: 'w-2 h-2 rounded-full bg-amber-400',
+        pill: 'border-amber-500/30 text-amber-300'
       },
       rose: {
         dot: 'w-2 h-2 rounded-full bg-rose-500',
-        pill: 'border-rose-500/40 text-rose-300'
+        pill: 'border-rose-500/30 text-rose-300'
       },
-      cyan: {
-        dot: 'w-2 h-2 rounded-full bg-cyan-400 animate-ping',
-        pill: 'border-cyan-500/40 text-cyan-300'
+      blue: {
+        dot: 'w-2 h-2 rounded-full bg-blue-400',
+        pill: 'border-blue-500/30 text-blue-300'
       }
     };
 
@@ -324,7 +430,7 @@ class AirQRApp {
     if (dot) dot.className = cfg.dot;
     if (statusText) statusText.textContent = stateLabel;
 
-    // Bridge Status
+    // Bridge Status Card
     const bridgeDot = document.getElementById('bridge-pulse-dot');
     const bridgeMsg = document.getElementById('bridge-status-msg');
     if (bridgeDot) bridgeDot.className = cfg.dot;
@@ -335,6 +441,71 @@ class AirQRApp {
     const rxMsg = document.getElementById('receiver-status-msg');
     if (rxDot) rxDot.className = cfg.dot;
     if (rxMsg) rxMsg.textContent = stateLabel;
+  }
+
+  /**
+   * Adds an item to the session transmission history feed.
+   * @private
+   */
+  _addActivityLog(item) {
+    this.sessionHistory.unshift(item);
+
+    const list = document.getElementById('session-activity-list');
+    const placeholder = document.getElementById('activity-empty-placeholder');
+    if (placeholder) placeholder.remove();
+
+    if (!list) return;
+
+    const row = document.createElement('div');
+    row.className = 'flex items-center justify-between p-2.5 rounded-lg bg-[#0b0c0e] border border-white/[0.06] text-xs animate-in fade-in duration-200';
+
+    const isFile = item.type === 'file';
+    const timeStr = new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    row.innerHTML = `
+      <div class="flex items-center gap-2.5 overflow-hidden">
+        <div class="w-6 h-6 rounded bg-zinc-800 border border-zinc-700/60 flex items-center justify-center text-zinc-400 flex-shrink-0">
+          ${isFile ? `
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/></svg>
+          ` : `
+            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" x2="15" y1="20" y2="20"/><line x1="12" x2="12" y1="4" y2="20"/></svg>
+          `}
+        </div>
+        <div class="min-w-0">
+          <p class="font-medium text-zinc-200 truncate max-w-[200px] sm:max-w-xs">${escapeHtml(item.name)}</p>
+          <p class="text-[11px] text-zinc-500 font-mono tabular-nums">${item.detail}</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 flex-shrink-0">
+        <span class="text-[10px] text-zinc-500 font-mono tabular-nums">${timeStr}</span>
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+      </div>
+    `;
+
+    list.insertBefore(row, list.firstChild);
+
+    const badge = document.getElementById('activity-count-badge');
+    if (badge) {
+      badge.textContent = `${this.sessionHistory.length} item${this.sessionHistory.length === 1 ? '' : 's'}`;
+    }
+  }
+
+  /**
+   * Updates sound toggle UI state.
+   * @private
+   */
+  _updateSoundUi() {
+    const onIcon = document.getElementById('icon-sound-on');
+    const offIcon = document.getElementById('icon-sound-off');
+    if (onIcon && offIcon) {
+      if (this.soundEnabled) {
+        onIcon.classList.remove('hidden');
+        offIcon.classList.add('hidden');
+      } else {
+        onIcon.classList.add('hidden');
+        offIcon.classList.remove('hidden');
+      }
+    }
   }
 
   /**
@@ -349,15 +520,17 @@ class AirQRApp {
     const contentFile = document.getElementById('tab-content-file');
 
     tabText?.addEventListener('click', () => {
-      tabText.className = 'px-3.5 py-1.5 rounded-lg bg-slate-800 text-white shadow-sm transition-all flex items-center gap-1.5';
-      tabFile.className = 'px-3.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 transition-all flex items-center gap-1.5';
+      this._playSound('click');
+      tabText.className = 'px-3 py-1 rounded-md bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/50 transition-all flex items-center gap-1.5';
+      tabFile.className = 'px-3 py-1 rounded-md text-zinc-400 hover:text-zinc-200 transition-all flex items-center gap-1.5';
       contentText?.classList.remove('hidden');
       contentFile?.classList.add('hidden');
     });
 
     tabFile?.addEventListener('click', () => {
-      tabFile.className = 'px-3.5 py-1.5 rounded-lg bg-slate-800 text-white shadow-sm transition-all flex items-center gap-1.5';
-      tabText.className = 'px-3.5 py-1.5 rounded-lg text-slate-400 hover:text-slate-200 transition-all flex items-center gap-1.5';
+      this._playSound('click');
+      tabFile.className = 'px-3 py-1 rounded-md bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/50 transition-all flex items-center gap-1.5';
+      tabText.className = 'px-3 py-1 rounded-md text-zinc-400 hover:text-zinc-200 transition-all flex items-center gap-1.5';
       contentFile?.classList.remove('hidden');
       contentText?.classList.add('hidden');
     });
@@ -376,20 +549,29 @@ class AirQRApp {
       if (detectedBadge) {
         if (!val.trim()) {
           detectedBadge.textContent = 'Empty';
-          detectedBadge.className = 'px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[11px] border border-slate-700/50';
+          detectedBadge.className = 'px-2 py-0.5 rounded bg-zinc-800/80 text-zinc-400 font-mono text-[11px] border border-zinc-700/50';
         } else if (/^https?:\/\//i.test(val.trim())) {
           detectedBadge.textContent = 'URL Detected';
-          detectedBadge.className = 'px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-mono text-[11px] border border-cyan-500/40';
+          detectedBadge.className = 'px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 font-mono text-[11px] border border-blue-500/20';
         } else {
           detectedBadge.textContent = 'Plain Text';
-          detectedBadge.className = 'px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[11px] border border-slate-700';
+          detectedBadge.className = 'px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono text-[11px] border border-zinc-700';
         }
+      }
+    });
+
+    // Keyboard shortcut: ⌘+Enter or Ctrl+Enter to transmit text
+    textarea?.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        streamTextBtn?.click();
       }
     });
 
     // Paste Action
     const pasteBtn = document.getElementById('btn-paste-clipboard');
     pasteBtn?.addEventListener('click', async () => {
+      this._playSound('click');
       try {
         const text = await navigator.clipboard.readText();
         if (textarea) {
@@ -405,6 +587,7 @@ class AirQRApp {
     // Clear Action
     const clearBtn = document.getElementById('btn-clear-text');
     clearBtn?.addEventListener('click', () => {
+      this._playSound('click');
       if (textarea) {
         textarea.value = '';
         textarea.dispatchEvent(new Event('input'));
@@ -423,9 +606,6 @@ class AirQRApp {
     // 3. Drop Zone & File Management
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input');
-    const stagedFileCard = document.getElementById('staged-file-card');
-    const stagedFileName = document.getElementById('staged-file-name');
-    const stagedFileSize = document.getElementById('staged-file-size');
     const removeFileBtn = document.getElementById('btn-remove-staged-file');
     const streamFileBtn = document.getElementById('btn-stream-file');
 
@@ -433,17 +613,53 @@ class AirQRApp {
 
     dropZone?.addEventListener('dragover', (e) => {
       e.preventDefault();
-      dropZone.classList.add('border-cyan-400', 'bg-cyan-500/5');
+      dropZone.classList.add('drag-active');
     });
 
     dropZone?.addEventListener('dragleave', () => {
-      dropZone.classList.remove('border-cyan-400', 'bg-cyan-500/5');
+      dropZone.classList.remove('drag-active');
     });
 
     dropZone?.addEventListener('drop', (e) => {
       e.preventDefault();
-      dropZone.classList.remove('border-cyan-400', 'bg-cyan-500/5');
+      dropZone.classList.remove('drag-active');
       if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        this._selectFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    // Global Window Drag & Drop Overlay
+    const globalOverlay = document.getElementById('global-drop-overlay');
+    let dragCounter = 0;
+
+    window.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dragCounter++;
+      if (globalOverlay && e.dataTransfer.types.includes('Files')) {
+        globalOverlay.classList.remove('hidden');
+      }
+    });
+
+    window.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      dragCounter--;
+      if (dragCounter <= 0 && globalOverlay) {
+        globalOverlay.classList.add('hidden');
+        dragCounter = 0;
+      }
+    });
+
+    window.addEventListener('dragover', (e) => {
+      e.preventDefault();
+    });
+
+    window.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dragCounter = 0;
+      if (globalOverlay) globalOverlay.classList.add('hidden');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        // Automatically switch to file tab if on sender view
+        tabFile?.click();
         this._selectFile(e.dataTransfer.files[0]);
       }
     });
@@ -455,9 +671,11 @@ class AirQRApp {
     });
 
     removeFileBtn?.addEventListener('click', () => {
+      this._playSound('click');
       this.stagedFile = null;
       if (fileInput) fileInput.value = '';
-      stagedFileCard?.classList.add('hidden');
+      const stagedCard = document.getElementById('staged-file-card');
+      stagedCard?.classList.add('hidden');
       if (streamFileBtn) streamFileBtn.disabled = true;
     });
 
@@ -467,9 +685,10 @@ class AirQRApp {
       }
     });
 
-    // 4. Session Controls: Copy URL, Regenerate, Reconnect
+    // 4. Session Controls: Copy URL, Regenerate, Reconnect, Sound
     const copyUrlBtn = document.getElementById('btn-copy-url');
     copyUrlBtn?.addEventListener('click', () => {
+      this._playSound('click');
       const input = document.getElementById('input-session-url');
       if (input) {
         navigator.clipboard.writeText(input.value);
@@ -484,6 +703,7 @@ class AirQRApp {
 
     const refreshRoomBtn = document.getElementById('btn-refresh-room');
     refreshRoomBtn?.addEventListener('click', () => {
+      this._playSound('click');
       window.location.hash = '';
       this._mountSenderMode();
       this._showToast('Fresh room session generated', 'info');
@@ -491,10 +711,25 @@ class AirQRApp {
 
     const reconnectMobileBtn = document.getElementById('btn-reconnect-mobile');
     reconnectMobileBtn?.addEventListener('click', () => {
+      this._playSound('click');
       const hash = window.location.hash.slice(1).trim();
       if (hash) {
         this.peerManager.connectToPeer(hash);
         this._showToast('Reconnecting...', 'info');
+      }
+    });
+
+    // Sound toggle
+    const soundToggleBtn = document.getElementById('btn-toggle-sound');
+    soundToggleBtn?.addEventListener('click', () => {
+      this.soundEnabled = !this.soundEnabled;
+      localStorage.setItem('airqr_sound', String(this.soundEnabled));
+      this._updateSoundUi();
+      if (this.soundEnabled) {
+        this._playSound('click');
+        this._showToast('Sound effects enabled', 'info');
+      } else {
+        this._showToast('Sound effects muted', 'info');
       }
     });
 
@@ -504,16 +739,24 @@ class AirQRApp {
     const closeModal = document.getElementById('btn-close-modal');
     const dismissModal = document.getElementById('btn-dismiss-modal');
 
-    infoBtn?.addEventListener('click', () => modal?.classList.remove('hidden'));
+    infoBtn?.addEventListener('click', () => {
+      this._playSound('click');
+      modal?.classList.remove('hidden');
+    });
     closeModal?.addEventListener('click', () => modal?.classList.add('hidden'));
     dismissModal?.addEventListener('click', () => modal?.classList.add('hidden'));
     modal?.addEventListener('click', (e) => {
       if (e.target === modal) modal.classList.add('hidden');
     });
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
+        modal.classList.add('hidden');
+      }
+    });
   }
 
   /**
-   * Stages a selected file for transfer.
+   * Stages a selected file for transfer and generates thumbnail if image.
    * @param {File} file 
    * @private
    */
@@ -531,27 +774,51 @@ class AirQRApp {
     const stagedFileName = document.getElementById('staged-file-name');
     const stagedFileSize = document.getElementById('staged-file-size');
     const streamFileBtn = document.getElementById('btn-stream-file');
+    const imagePreview = document.getElementById('staged-image-preview');
+    const fileIcon = document.getElementById('staged-file-icon');
 
     if (stagedFileName) stagedFileName.textContent = file.name;
     if (stagedFileSize) stagedFileSize.textContent = `${formatBytes(file.size)} • ${file.type || 'binary'}`;
+
+    // Thumbnail generation if image
+    if (file.type && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (imagePreview) {
+          imagePreview.src = e.target.result;
+          imagePreview.classList.remove('hidden');
+        }
+        if (fileIcon) fileIcon.classList.add('hidden');
+      };
+      reader.readAsDataURL(file);
+    } else {
+      if (imagePreview) imagePreview.classList.add('hidden');
+      if (fileIcon) fileIcon.classList.remove('hidden');
+    }
+
     if (stagedFileCard) stagedFileCard.classList.remove('hidden');
     if (streamFileBtn) streamFileBtn.disabled = false;
 
+    this._playSound('click');
     this._showToast(`Staged ${file.name} in-memory`, 'info');
   }
 
+  /**
+   * Renders high-craft toasts with clean typography and borders.
+   * @private
+   */
   _showToast(msg, type = 'info') {
     const container = document.getElementById('toast-container');
     if (!container) return;
 
     const toast = document.createElement('div');
     const bgClass = type === 'success'
-      ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-200'
+      ? 'bg-[#121215] border-emerald-500/40 text-emerald-300'
       : type === 'error'
-      ? 'bg-rose-950/90 border-rose-500/50 text-rose-200'
-      : 'bg-slate-900/90 border-slate-700 text-slate-200';
+      ? 'bg-[#121215] border-rose-500/40 text-rose-300'
+      : 'bg-[#121215] border-white/10 text-zinc-200';
 
-    toast.className = `px-4 py-2.5 rounded-xl border backdrop-blur-md shadow-2xl text-xs font-medium flex items-center gap-2 transform translate-y-2 opacity-0 transition-all duration-200 pointer-events-auto ${bgClass}`;
+    toast.className = `px-3.5 py-2 rounded-lg border shadow-lg text-xs font-medium flex items-center gap-2 transform translate-y-2 opacity-0 transition-all duration-200 pointer-events-auto ${bgClass}`;
     toast.innerHTML = `<span>${escapeHtml(msg)}</span>`;
     container.appendChild(toast);
 
@@ -563,7 +830,7 @@ class AirQRApp {
     setTimeout(() => {
       toast.classList.add('opacity-0', 'translate-y-2');
       setTimeout(() => toast.remove(), 250);
-    }, 3000);
+    }, 2800);
   }
 }
 
