@@ -1,6 +1,6 @@
 /**
  * AirQR — Main Application Controller
- * Orchestrates routing, DOM events, WebRTC lifecycle, and session interactions.
+ * Orchestrates routing, DOM events, WebRTC lifecycle, and bidirectional session interactions.
  * Path: app.js
  */
 
@@ -12,11 +12,14 @@ class AirQRApp {
   constructor() {
     this.peerManager = new PeerTransportManager();
     this.streamer = new BinaryChunkStreamer(this.peerManager);
-    this.assembler = new BinaryChunkAssembler();
+    this.assembler = new BinaryChunkAssembler();      // Receiver-side assembler (mobile)
+    this.desktopAssembler = new BinaryChunkAssembler(); // Desktop-side assembler for incoming mobile files
 
     this.currentMode = null; // 'sender' | 'receiver'
     this.stagedText = null;
     this.stagedFile = null;
+    this.mobileStagedText = null;  // Mobile composer text
+    this.mobileStagedFile = null;  // Mobile composer file
     this.qrInstance = null;
     this.soundEnabled = localStorage.getItem('airqr_sound') !== 'false';
     this.sessionHistory = [];
@@ -24,6 +27,7 @@ class AirQRApp {
 
     this._bindTransportEvents();
     this._bindDomEvents();
+    this._bindMobileSendEvents();
     this._initAudio();
   }
 
@@ -218,6 +222,10 @@ class AirQRApp {
 
       this._showToast('Mobile device linked via P2P', 'success');
 
+      // Show the Send to Laptop section on mobile when connected
+      const mobileSendSection = document.getElementById('mobile-send-section');
+      if (mobileSendSection) mobileSendSection.classList.remove('hidden');
+
       // Auto-State Sync: transmit staged payload immediately if uploaded before scan
       this._dispatchStagedPayload();
     });
@@ -240,12 +248,98 @@ class AirQRApp {
 
   /**
    * Processes incoming data packets from the peer.
+   * Routes to the correct handler based on current mode.
    * @param {Object} data 
    * @private
    */
   _handleIncomingData(data) {
     if (!data) return;
 
+    if (this.currentMode === 'sender') {
+      this._handleDesktopIncomingData(data);
+    } else {
+      this._handleMobileIncomingData(data);
+    }
+  }
+
+  /**
+   * Handles incoming data on the DESKTOP side (received from mobile).
+   * @param {Object} data 
+   * @private
+   */
+  _handleDesktopIncomingData(data) {
+    // Text/URL from mobile
+    if (data.type === 'TEXT_PAYLOAD' || data.type === 'text') {
+      const receivedCard = document.getElementById('desktop-received-card');
+      const container = document.getElementById('desktop-received-payload-box');
+      if (receivedCard) receivedCard.classList.remove('hidden');
+      if (container) container.classList.remove('hidden');
+
+      const textVal = data.payload || data.text;
+      renderMobilePayload({
+        type: 'text',
+        text: textVal,
+        isUrl: data.isUrl,
+        timestamp: data.timestamp || Date.now()
+      }, container);
+
+      this._playSound('success');
+      this._showToast('Received text from mobile', 'success');
+      this._addActivityLog({
+        type: 'text',
+        name: textVal.length > 30 ? textVal.substring(0, 30) + '...' : textVal,
+        detail: `${textVal.length} chars • from mobile`,
+        timestamp: Date.now()
+      });
+      return;
+    }
+
+    // Binary file from mobile
+    if (data.type === 'FILE_START' || data.type === 'FILE_CHUNK' || data.type === 'FILE_END') {
+      const progressBox = document.getElementById('desktop-rx-progress-box');
+      const receivedCard = document.getElementById('desktop-received-card');
+      const container = document.getElementById('desktop-received-payload-box');
+
+      this.desktopAssembler.handleFrame(
+        data,
+        (transferred, total, percent, speed, fileName) => {
+          if (progressBox) progressBox.classList.remove('hidden');
+
+          const rxFileName = document.getElementById('desktop-rx-file-name');
+          const rxBar = document.getElementById('desktop-rx-progress-bar');
+          const rxSpeed = document.getElementById('desktop-rx-speed-stat');
+          const rxBytes = document.getElementById('desktop-rx-bytes-stat');
+
+          if (rxFileName && fileName) rxFileName.textContent = fileName;
+          if (rxBar) rxBar.style.width = `${percent}%`;
+          if (rxSpeed) rxSpeed.textContent = `${speed} • ${percent}%`;
+          if (rxBytes) rxBytes.textContent = `${formatBytes(transferred)} / ${formatBytes(total)}`;
+        },
+        (filePayload) => {
+          if (progressBox) progressBox.classList.add('hidden');
+          if (receivedCard) receivedCard.classList.remove('hidden');
+          if (container) container.classList.remove('hidden');
+          renderMobilePayload(filePayload, container);
+          this._playSound('success');
+          this._showToast(`Received ${filePayload.name} from mobile`, 'success');
+
+          this._addActivityLog({
+            type: 'file',
+            name: filePayload.name,
+            detail: `${formatBytes(filePayload.size)} • from mobile`,
+            timestamp: Date.now()
+          });
+        }
+      );
+    }
+  }
+
+  /**
+   * Handles incoming data on the MOBILE side (received from desktop).
+   * @param {Object} data 
+   * @private
+   */
+  _handleMobileIncomingData(data) {
     // Check if it's structured text/URL
     if (data.type === 'TEXT_PAYLOAD' || data.type === 'text') {
       const container = document.getElementById('receiver-payload-box');
@@ -753,6 +847,191 @@ class AirQRApp {
         modal.classList.add('hidden');
       }
     });
+  }
+
+  /**
+   * Binds all mobile "Send to Laptop" composer interactions.
+   * Handles text/file tab switching, file staging, and transmit actions.
+   * @private
+   */
+  _bindMobileSendEvents() {
+    // Mobile Tab Switching
+    const mobileTabText = document.getElementById('mobile-tab-text');
+    const mobileTabFile = document.getElementById('mobile-tab-file');
+    const mobileTextComposer = document.getElementById('mobile-text-composer');
+    const mobileFileComposer = document.getElementById('mobile-file-composer');
+
+    mobileTabText?.addEventListener('click', () => {
+      this._playSound('click');
+      mobileTabText.className = 'px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/50 transition-all';
+      mobileTabFile.className = 'px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-all';
+      mobileTextComposer?.classList.remove('hidden');
+      mobileFileComposer?.classList.add('hidden');
+    });
+
+    mobileTabFile?.addEventListener('click', () => {
+      this._playSound('click');
+      mobileTabFile.className = 'px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/50 transition-all';
+      mobileTabText.className = 'px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-all';
+      mobileFileComposer?.classList.remove('hidden');
+      mobileTextComposer?.classList.add('hidden');
+    });
+
+    // Mobile Text Send
+    const mobileTextarea = document.getElementById('mobile-payload-textarea');
+    const mobileSendTextBtn = document.getElementById('btn-mobile-send-text');
+
+    mobileTextarea?.addEventListener('input', () => {
+      this.mobileStagedText = mobileTextarea.value.trim() ? mobileTextarea.value : null;
+    });
+
+    mobileSendTextBtn?.addEventListener('click', () => {
+      if (this.mobileStagedText) {
+        this._transmitText(this.mobileStagedText);
+        mobileTextarea.value = '';
+        this.mobileStagedText = null;
+      } else {
+        this._showToast('Type something to send', 'error');
+      }
+    });
+
+    // Mobile File Drop Zone
+    const mobileDropZone = document.getElementById('mobile-drop-zone');
+    const mobileFileInput = document.getElementById('mobile-file-input');
+    const mobileRemoveBtn = document.getElementById('btn-mobile-remove-file');
+    const mobileSendFileBtn = document.getElementById('btn-mobile-send-file');
+
+    mobileDropZone?.addEventListener('click', () => mobileFileInput?.click());
+
+    mobileDropZone?.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      mobileDropZone.classList.add('drag-active');
+    });
+
+    mobileDropZone?.addEventListener('dragleave', () => {
+      mobileDropZone.classList.remove('drag-active');
+    });
+
+    mobileDropZone?.addEventListener('drop', (e) => {
+      e.preventDefault();
+      mobileDropZone.classList.remove('drag-active');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        this._selectMobileFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    mobileFileInput?.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        this._selectMobileFile(e.target.files[0]);
+      }
+    });
+
+    mobileRemoveBtn?.addEventListener('click', () => {
+      this._playSound('click');
+      this.mobileStagedFile = null;
+      if (mobileFileInput) mobileFileInput.value = '';
+      const card = document.getElementById('mobile-staged-file-card');
+      card?.classList.add('hidden');
+      if (mobileSendFileBtn) mobileSendFileBtn.disabled = true;
+    });
+
+    mobileSendFileBtn?.addEventListener('click', () => {
+      if (this.mobileStagedFile) {
+        this._transmitMobileFile(this.mobileStagedFile);
+      }
+    });
+  }
+
+  /**
+   * Stages a file on the mobile side for sending to the laptop.
+   * @param {File} file 
+   * @private
+   */
+  _selectMobileFile(file) {
+    if (!file) return;
+
+    if (file.size > 50 * 1024 * 1024) {
+      this._showToast('File exceeds 50MB maximum limit', 'error');
+      return;
+    }
+
+    this.mobileStagedFile = file;
+
+    const stagedCard = document.getElementById('mobile-staged-file-card');
+    const stagedName = document.getElementById('mobile-staged-name');
+    const stagedSize = document.getElementById('mobile-staged-size');
+    const sendBtn = document.getElementById('btn-mobile-send-file');
+    const preview = document.getElementById('mobile-staged-preview');
+    const icon = document.getElementById('mobile-staged-icon');
+
+    if (stagedName) stagedName.textContent = file.name;
+    if (stagedSize) stagedSize.textContent = `${formatBytes(file.size)} • ${file.type || 'binary'}`;
+
+    if (file.type && file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (preview) {
+          preview.src = e.target.result;
+          preview.classList.remove('hidden');
+        }
+        if (icon) icon.classList.add('hidden');
+      };
+      reader.readAsDataURL(file);
+    } else {
+      if (preview) preview.classList.add('hidden');
+      if (icon) icon.classList.remove('hidden');
+    }
+
+    if (stagedCard) stagedCard.classList.remove('hidden');
+    if (sendBtn) sendBtn.disabled = false;
+
+    this._playSound('click');
+    this._showToast(`Staged ${file.name} for sending`, 'info');
+  }
+
+  /**
+   * Transmits a file from mobile to desktop with progress tracking.
+   * @param {File} file 
+   * @private
+   */
+  async _transmitMobileFile(file) {
+    if (!file) return;
+
+    const progressBox = document.getElementById('mobile-send-progress-box');
+    const progressBar = document.getElementById('mobile-send-progress-bar');
+    const progressTitle = document.getElementById('mobile-send-title');
+    const progressSpeed = document.getElementById('mobile-send-speed');
+    const progressBytes = document.getElementById('mobile-send-bytes');
+
+    if (progressBox) progressBox.classList.remove('hidden');
+    if (progressTitle) progressTitle.textContent = file.name;
+
+    try {
+      await this.streamer.streamFile(file, (sentBytes, totalBytes, percent, speed) => {
+        if (progressBar) progressBar.style.width = `${percent}%`;
+        if (progressSpeed) progressSpeed.textContent = `${speed} • ${percent}%`;
+        if (progressBytes) progressBytes.textContent = `${formatBytes(sentBytes)} / ${formatBytes(totalBytes)}`;
+      });
+      triggerHaptic();
+      this._playSound('success');
+      this._showToast(`Sent ${file.name} to laptop`, 'success');
+
+      // Reset progress after completion
+      setTimeout(() => {
+        if (progressBox) progressBox.classList.add('hidden');
+        if (progressBar) progressBar.style.width = '0%';
+      }, 1500);
+
+      this._addActivityLog({
+        type: 'file',
+        name: file.name,
+        detail: `${formatBytes(file.size)} • sent to laptop`,
+        timestamp: Date.now()
+      });
+    } catch (err) {
+      this._showToast(`Send failed: ${err.message}`, 'error');
+      if (progressBox) progressBox.classList.add('hidden');
+    }
   }
 
   /**

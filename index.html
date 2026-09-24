@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>AirQR — Ephemeral Screen-to-Mobile Transfer Bridge</title>
-  <meta name="description" content="Instant, zero-server-storage, screen-to-mobile WebRTC bridge. Transfer text, URLs, images, and files up to 50MB directly in-memory over an encrypted peer-to-peer data channel.">
+  <title>AirQR — Bidirectional Peer-to-Peer Transfer Bridge</title>
+  <meta name="description" content="Instant, zero-server-storage, bidirectional WebRTC bridge. Transfer text, URLs, images, and files up to 50MB directly in-memory over an encrypted peer-to-peer data channel between any two devices.">
   
   <!-- Tailwind CSS Play CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -195,7 +195,7 @@
             <h1 class="font-semibold text-base tracking-tight text-white">AirQR</h1>
             <span class="px-1.5 py-0.5 text-[10px] font-mono font-medium rounded bg-zinc-800/80 text-zinc-300 border border-zinc-700/60">P2P Bridge</span>
           </div>
-          <p class="text-[11px] text-zinc-400 hidden sm:block">Ephemeral Screen-to-Mobile Transfer • Zero Cloud Storage</p>
+          <p class="text-[11px] text-zinc-400 hidden sm:block">Bidirectional Peer-to-Peer Transfer • Zero Cloud Storage</p>
         </div>
       </div>
 
@@ -400,6 +400,39 @@
 
             </div>
 
+            <!-- Received from Mobile Section -->
+            <div id="desktop-received-card" class="hidden bg-[#121215] border border-emerald-500/20 rounded-xl p-4 shadow-subtle-card">
+              <div class="flex items-center justify-between pb-3 mb-3 border-b border-white/[0.08]">
+                <div class="flex items-center gap-2">
+                  <div class="w-7 h-7 rounded-md bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"/>
+                      <path d="M12 12v9"/>
+                      <path d="m8 17 4 4 4-4"/>
+                    </svg>
+                  </div>
+                  <h3 class="text-xs font-semibold uppercase tracking-wider text-emerald-300">Received from Mobile</h3>
+                </div>
+                <span class="px-1.5 py-0.5 text-[10px] font-mono rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">INCOMING</span>
+              </div>
+              <div id="desktop-received-payload-box" class="flex flex-col gap-3"></div>
+            </div>
+
+            <!-- Desktop Incoming Transfer Progress -->
+            <div id="desktop-rx-progress-box" class="hidden bg-[#121215] border border-blue-500/20 rounded-xl p-4 shadow-subtle-card">
+              <div class="flex items-center justify-between text-xs mb-2">
+                <span id="desktop-rx-file-name" class="font-medium text-zinc-200 truncate">Receiving from mobile...</span>
+                <span id="desktop-rx-speed-stat" class="font-mono text-zinc-300 tabular-nums">0%</span>
+              </div>
+              <div class="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                <div id="desktop-rx-progress-bar" class="h-full bg-emerald-500 rounded-full transition-all duration-100 w-0"></div>
+              </div>
+              <div class="flex justify-between text-[10px] text-zinc-500 font-mono tabular-nums mt-1.5">
+                <span id="desktop-rx-bytes-stat">0 / 0 KB</span>
+                <span class="text-zinc-400">16KB Chunk Streaming</span>
+              </div>
+            </div>
+
             <!-- Session Activity Log -->
             <div id="session-activity-card" class="bg-[#121215] border border-white/10 rounded-xl p-4 shadow-subtle-card">
               <div class="flex items-center justify-between pb-2 mb-2 border-b border-white/[0.06]">
@@ -596,6 +629,118 @@
           <!-- Mobile Payload Container (Rendered by payload_viewer.js) -->
           <div id="receiver-payload-box" class="hidden flex flex-col gap-3"></div>
 
+          <!-- ===== Send to Laptop Composer (Mobile → Desktop) ===== -->
+          <div id="mobile-send-section" class="hidden">
+            <div class="bg-[#0b0c0e] border border-white/[0.08] rounded-xl p-4 flex flex-col gap-3">
+              <div class="flex items-center justify-between pb-2 border-b border-white/[0.06]">
+                <div class="flex items-center gap-2">
+                  <div class="w-6 h-6 rounded-md bg-blue-500/10 text-blue-400 flex items-center justify-center">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="m22 2-7 20-4-9-9-4Z"/>
+                      <path d="M22 2 11 13"/>
+                    </svg>
+                  </div>
+                  <h3 class="text-xs font-semibold text-zinc-200 uppercase tracking-wider">Send to Laptop</h3>
+                </div>
+                <!-- Mobile Segmented Switcher -->
+                <div class="flex items-center bg-zinc-900 p-0.5 rounded-md border border-white/[0.06] text-[10px] font-medium">
+                  <button id="mobile-tab-text" class="px-2 py-0.5 rounded bg-zinc-800 text-zinc-100 shadow-sm border border-zinc-700/50 transition-all">Text</button>
+                  <button id="mobile-tab-file" class="px-2 py-0.5 rounded text-zinc-400 hover:text-zinc-200 transition-all">File</button>
+                </div>
+              </div>
+
+              <!-- Mobile Text Composer -->
+              <div id="mobile-text-composer" class="flex flex-col gap-2">
+                <textarea 
+                  id="mobile-payload-textarea" 
+                  rows="3" 
+                  placeholder="Type a note, link, or snippet to send to laptop..."
+                  class="w-full bg-zinc-900 border border-white/[0.08] focus:border-zinc-500 rounded-lg p-3 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none transition-colors resize-none leading-relaxed"
+                ></textarea>
+                <button 
+                  id="btn-mobile-send-text" 
+                  class="w-full py-2.5 px-3 rounded-lg font-semibold text-xs bg-white hover:bg-zinc-100 text-zinc-950 transition-all flex items-center justify-center gap-2 active:scale-[0.98] shadow-sm"
+                >
+                  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="m22 2-7 20-4-9-9-4Z"/>
+                    <path d="M22 2 11 13"/>
+                  </svg>
+                  <span>Send to Laptop</span>
+                </button>
+              </div>
+
+              <!-- Mobile File Composer -->
+              <div id="mobile-file-composer" class="hidden flex flex-col gap-2">
+                <div 
+                  id="mobile-drop-zone" 
+                  class="border border-dashed border-zinc-700 hover:border-zinc-500 bg-zinc-900 rounded-lg p-5 text-center transition-colors cursor-pointer flex flex-col items-center justify-center gap-2 group"
+                >
+                  <input id="mobile-file-input" type="file" class="hidden" />
+                  <div class="w-9 h-9 rounded-md bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-zinc-300 group-hover:text-white transition-colors">
+                    <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                      <polyline points="17 8 12 3 7 8"/>
+                      <line x1="12" x2="12" y1="3" y2="15"/>
+                    </svg>
+                  </div>
+                  <p class="text-xs text-zinc-300"><span class="text-blue-400">Choose file</span> or drop here</p>
+                  <p class="text-[10px] text-zinc-500">Up to 50MB</p>
+                </div>
+
+                <!-- Mobile Staged File Card -->
+                <div id="mobile-staged-file-card" class="hidden bg-zinc-900 border border-white/[0.08] rounded-lg p-2.5 flex items-center justify-between">
+                  <div class="flex items-center gap-2.5 overflow-hidden">
+                    <div id="mobile-staged-icon-wrap" class="w-8 h-8 rounded bg-zinc-800 border border-zinc-700/60 flex-shrink-0 flex items-center justify-center text-zinc-300 overflow-hidden">
+                      <img id="mobile-staged-preview" class="w-full h-full object-cover hidden" alt="Preview" />
+                      <svg id="mobile-staged-icon" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                      </svg>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <p id="mobile-staged-name" class="text-xs font-medium text-zinc-200 truncate">file.bin</p>
+                      <p id="mobile-staged-size" class="text-[10px] text-zinc-500 font-mono tabular-nums">0 KB</p>
+                    </div>
+                  </div>
+                  <button id="btn-mobile-remove-file" class="p-1 text-zinc-500 hover:text-rose-400 rounded transition-colors" title="Remove">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M18 6 6 18"/>
+                      <path d="m6 6 12 12"/>
+                    </svg>
+                  </button>
+                </div>
+
+                <button 
+                  id="btn-mobile-send-file" 
+                  disabled
+                  class="w-full py-2.5 px-3 rounded-lg font-semibold text-xs bg-white hover:bg-zinc-100 text-zinc-950 transition-all flex items-center justify-center gap-2 disabled:opacity-30 disabled:pointer-events-none active:scale-[0.98] shadow-sm"
+                >
+                  <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" x2="12" y1="3" y2="15"/>
+                  </svg>
+                  <span>Send File to Laptop</span>
+                </button>
+              </div>
+
+              <!-- Mobile Send Progress -->
+              <div id="mobile-send-progress-box" class="hidden pt-3 border-t border-white/[0.06]">
+                <div class="flex items-center justify-between text-xs mb-1.5">
+                  <span id="mobile-send-title" class="font-medium text-zinc-300 truncate">Sending...</span>
+                  <span id="mobile-send-speed" class="font-mono text-zinc-200 tabular-nums">0%</span>
+                </div>
+                <div class="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                  <div id="mobile-send-progress-bar" class="h-full bg-blue-500 rounded-full transition-all duration-150 w-0"></div>
+                </div>
+                <div class="flex justify-between text-[10px] text-zinc-500 mt-1 font-mono tabular-nums">
+                  <span id="mobile-send-bytes">0 / 0 KB</span>
+                  <span>Uploading to Desktop</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- Mobile Receiver Action Footer -->
           <div class="pt-3 border-t border-white/[0.08] flex items-center justify-between text-xs text-zinc-400">
             <button id="btn-reconnect-mobile" class="hover:text-white transition-colors flex items-center gap-1 font-medium">
@@ -618,7 +763,7 @@
     <footer class="mt-8 pt-4 border-t border-white/[0.08] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-zinc-500">
       <div class="flex items-center gap-2">
         <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-        <span>Direct In-Memory WebRTC DataChannel • Zero Cloud Footprint</span>
+        <span>Bidirectional In-Memory WebRTC DataChannel • Zero Cloud Footprint</span>
       </div>
       <div class="flex items-center gap-4">
         <span>STUN Traversal</span>
