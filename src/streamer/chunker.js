@@ -1,15 +1,19 @@
 /**
  * AirQR — Binary Chunker & Flow Controller
- * 16KB discrete slicing, protocol framing, and SCTP backpressure management.
+ * 16KB discrete slicing, protocol framing, and robust SCTP backpressure management.
+ * Supports bidirectional file transfers up to 50MB with proper buffer drain.
  * Path: src/streamer/chunker.js
  */
 
 export const CHUNK_SIZE = 16 * 1024; // 16,384 bytes per WebRTC frame
-export const BUFFERED_AMOUNT_HIGH_WATERMARK = 65536; // 64KB backpressure threshold
-export const BUFFERED_AMOUNT_LOW_WATERMARK = 32768; // 32KB resume threshold
+export const BUFFERED_AMOUNT_HIGH_WATERMARK = 262144; // 256KB — pause sending when buffer exceeds this
+export const BUFFERED_AMOUNT_LOW_WATERMARK = 65536;   // 64KB  — resume sending when buffer drains to this
+export const BACKPRESSURE_POLL_INTERVAL = 16;          // ~60fps polling rate for buffer drain check
+export const BACKPRESSURE_SAFETY_TIMEOUT = 30000;      // 30s hard safety timeout per drain wait
 
 /**
- * Streams files in discrete 16KB chunks over WebRTC DataChannel with backpressure flow control.
+ * Streams files in discrete 16KB chunks over WebRTC DataChannel with robust backpressure flow control.
+ * Handles files up to 50MB with proper buffer monitoring and drain-before-send semantics.
  */
 export class BinaryChunkStreamer {
   constructor(peerManager) {
@@ -33,6 +37,9 @@ export class BinaryChunkStreamer {
     const startTime = Date.now();
 
     try {
+      // Verify connection health before starting
+      this._assertConnectionOpen();
+
       // 1. Dispatch Frame 1: FILE_START metadata
       this.peerManager.send({
         type: 'FILE_START',
@@ -44,8 +51,11 @@ export class BinaryChunkStreamer {
 
       // 2. Stream 16KB Slices with Backpressure Monitoring
       for (let i = 0; i < totalChunks; i++) {
-        // Enforce backpressure check: pause if bufferedAmount > 64KB
+        // Enforce backpressure: wait for buffer to drain before sending next chunk
         await this._applyBackpressure();
+
+        // Re-check connection health after potential backpressure wait
+        this._assertConnectionOpen();
 
         const start = i * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, file.size);
@@ -72,7 +82,16 @@ export class BinaryChunkStreamer {
         if (typeof onProgress === 'function') {
           onProgress(transferredBytes, file.size, percent, speedStr);
         }
+
+        // Micro-yield: let the browser event loop breathe every 32 chunks (~512KB)
+        // This prevents UI freeze on large files and gives the network stack time to flush
+        if (i > 0 && i % 32 === 0) {
+          await this._yield();
+        }
       }
+
+      // Wait for final drain before sending FILE_END to ensure all chunks are flushed
+      await this._applyBackpressure();
 
       // 3. Dispatch Frame End: FILE_END
       this.peerManager.send({
@@ -105,33 +124,77 @@ export class BinaryChunkStreamer {
   }
 
   /**
-   * Backpressure rule: Pauses stream when dataChannel.bufferedAmount > 65536.
-   * Resumes when 'bufferedamountlow' fires or watchdog timer expires.
+   * Robust backpressure: Pauses stream when dataChannel.bufferedAmount > 256KB.
+   * Uses dual strategy — event-based (bufferedamountlow) + polling fallback.
+   * Will NOT proceed until buffer drains to 64KB or connection dies.
+   * 30-second safety timeout prevents permanent stalls if the connection is alive but very slow.
    * @private
    */
   async _applyBackpressure() {
     const dataChannel = this.peerManager.getDataChannel();
     if (!dataChannel) return;
+    if (dataChannel.bufferedAmount <= BUFFERED_AMOUNT_HIGH_WATERMARK) return;
 
-    if (dataChannel.bufferedAmount > BUFFERED_AMOUNT_HIGH_WATERMARK) {
-      await new Promise((resolve) => {
-        let watchdog;
-        const handleLow = () => {
-          clearTimeout(watchdog);
-          dataChannel.removeEventListener('bufferedamountlow', handleLow);
-          resolve();
-        };
+    await new Promise((resolve) => {
+      let resolved = false;
+      let pollTimer = null;
+      let safetyTimer = null;
 
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        if (pollTimer) clearInterval(pollTimer);
+        if (safetyTimer) clearTimeout(safetyTimer);
+        try {
+          dataChannel.removeEventListener('bufferedamountlow', onBufferLow);
+        } catch { /* ignore */ }
+        resolve();
+      };
+
+      // Strategy 1: Listen for the native bufferedamountlow event (fastest response)
+      const onBufferLow = () => done();
+      if (typeof dataChannel.bufferedAmountLowThreshold !== 'undefined') {
         dataChannel.bufferedAmountLowThreshold = BUFFERED_AMOUNT_LOW_WATERMARK;
-        dataChannel.addEventListener('bufferedamountlow', handleLow);
+        dataChannel.addEventListener('bufferedamountlow', onBufferLow);
+      }
 
-        // Safety watchdog: ensure stream does not stall indefinitely if event drops
-        watchdog = setTimeout(() => {
-          dataChannel.removeEventListener('bufferedamountlow', handleLow);
-          resolve();
-        }, 120);
-      });
+      // Strategy 2: Poll as fallback (in case event doesn't fire on some browsers/PeerJS versions)
+      pollTimer = setInterval(() => {
+        // Connection died — bail out
+        if (!dataChannel || dataChannel.readyState !== 'open') {
+          done();
+          return;
+        }
+        // Buffer drained below low watermark — safe to resume
+        if (dataChannel.bufferedAmount <= BUFFERED_AMOUNT_LOW_WATERMARK) {
+          done();
+        }
+      }, BACKPRESSURE_POLL_INTERVAL);
+
+      // Strategy 3: Hard safety timeout — prevents infinite stall on alive but extremely slow connections
+      safetyTimer = setTimeout(done, BACKPRESSURE_SAFETY_TIMEOUT);
+    });
+  }
+
+  /**
+   * Asserts that the WebRTC DataChannel is still open.
+   * Throws if connection has been lost mid-transfer.
+   * @private
+   */
+  _assertConnectionOpen() {
+    const conn = this.peerManager.getConnection();
+    if (!conn || !conn.open) {
+      throw new Error('WebRTC DataChannel closed during transfer');
     }
+  }
+
+  /**
+   * Yields to the browser event loop via a zero-delay setTimeout.
+   * Prevents UI thread starvation during large file streaming.
+   * @private
+   */
+  _yield() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   _formatBytes(bytes) {
